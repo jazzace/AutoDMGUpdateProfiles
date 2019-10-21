@@ -9,6 +9,7 @@ import sys
 import argparse
 import plistlib
 import datetime
+import re
 
 
 def uprint(*args, **kwargs):
@@ -27,6 +28,43 @@ def uprint(*args, **kwargs):
     print(*encoded_objects, **kwargs)
 
 
+re_build = re.compile(ur'^(?P<major>\d+)(?P<minor>[A-Z])(?P<build>.+)$')
+
+def verify_verbuild(verbuild):
+    ver, _, build = verbuild.partition(u"-")
+    vers = list(int(x) for x in ver.split(u"."))
+    if len(vers) not in [2, 3]:
+        uprint(u"ERROR: Bad version: %s" % verbuild)
+        return False
+    if vers[0] != 10:
+        uprint(u"ERROR: Bad version: %s" % verbuild)
+        return False
+    major = vers[1]
+    try:
+        minor = vers[2]
+    except IndexError:
+        minor = 0
+    if (major < 7) or (major > 16):
+        uprint(u"ERROR: Bad version: %s" % verbuild)
+        return False
+    if (minor < 0) or (minor > 15):
+        uprint(u"ERROR: Bad version: %s" % verbuild)
+        return False
+    m = re_build.search(build)
+    if not m:
+        uprint(u"ERROR: Bad build: %s" % verbuild)
+        return False
+    build_major = int(m.group(u"major"))
+    build_minor = ord(m.group(u"minor")) - 0x41
+    if build_major != major + 4:
+        uprint(u"ERROR: build major does not match OS major: %s" % verbuild)
+        return False
+    if build_minor != minor:
+        uprint(u"ERROR: build minor does not match OS minor: %s" % verbuild)
+        return False
+    return True
+
+
 def main(argv):
     p = argparse.ArgumentParser()
     p.add_argument(u"-v", u"--verbose", action=u"store_true",
@@ -42,7 +80,7 @@ def main(argv):
     error_count = 0
     
     # Verify root keys.
-    expected_keys = set([u"DeprecatedInstallers", u"PublicationDate", u"Profiles", u"Updates"])
+    expected_keys = set([u"DeprecatedInstallers", u"DeprecatedOSVersions", u"PublicationDate", u"Profiles", u"Updates"])
     found_keys = set(plist.iterkeys())
     if found_keys != expected_keys:
         missing_keys = expected_keys - found_keys
@@ -54,10 +92,16 @@ def main(argv):
     
     # Verify DeprecatedInstallers.
     supported_builds = set(x.partition(u"-")[2] for x in plist[u"DeprecatedInstallers"].iterkeys())
+    re_osbuild = re.compile(ur'^\d+[A-Z]\d+[a-z]?$')
     for replacement, replaced in plist[u"DeprecatedInstallers"].iteritems():
-        for version in replaced:
-            if version in supported_builds:
-                uprint(u"Error: %s deprecates supported version %s" % (replacement, version))
+        if not verify_verbuild(replacement):
+            error_count += 1
+        for build in replaced:
+            if not re_osbuild.search(build):
+                uprint(u"Error: invalid deprecated build %s" % build)
+                error_count += 1
+            if build in supported_builds:
+                uprint(u"Error: %s deprecates supported build %s" % (replacement, build))
                 error_count += 1
     
     # Verify PublicationDate.
@@ -69,6 +113,8 @@ def main(argv):
     known_updates = set(plist[u"Updates"].iterkeys())
     referenced_updates = set()
     for profile, updates in plist[u"Profiles"].iteritems():
+        if not verify_verbuild(profile):
+            error_count += 1
         for update in updates:
             if not update in known_updates:
                 uprint(u"Error: Profile %s references unknown update: %s" % (profile, update))
@@ -98,6 +144,14 @@ def main(argv):
     if error_count:
         return os.EX_DATAERR
     else:
+        uprint(u"Verified profiles:")
+        for verbuild in sorted(plist[u"Profiles"].iterkeys()):
+            deprecated = False
+            for depver in plist[u"DeprecatedOSVersions"]:
+                splitver = depver.split(u".")
+                if splitver == verbuild.split(u".")[:len(splitver)]:
+                    deprecated = True
+            uprint(u"  %s%s" % (verbuild, u" (deprecated)" if deprecated else u""))
         return os.EX_OK
     
 
